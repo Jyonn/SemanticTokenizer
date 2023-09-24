@@ -1,0 +1,5 @@
+name: H${model.config.num_heads}-C${model.config.num_codes}
+config:
+  embed_dim: 768
+  num_heads: 3
+  num_codes: 512

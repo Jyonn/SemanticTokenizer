@@ -4,7 +4,7 @@ import torch
 from UniTok import Vocab, UniDep
 
 from loader.embedding.embedding_manager import EmbeddingManager
-from model.utils.nr_depot import NRDepot
+from model.utils.nr_depot import ItemDepot
 
 
 class BaseInputer:
@@ -15,15 +15,16 @@ class BaseInputer:
     3. user clicks (news ids) -> 20 x 64
     4. user clicks (title, category) -> 20 x 64 -> 64
     """
-    def __init__(self, nrd: NRDepot, embedding_manager: EmbeddingManager, **kwargs):
-        self.depot = nrd.depot  # type: UniDep
-        self.order = nrd.order  # type: list
+    def __init__(self, item_depot: ItemDepot, embedding_manager: EmbeddingManager, **kwargs):
+        self.item_depot = item_depot  # type: ItemDepot
+        self.depot = item_depot.depot  # type: UniDep
+        self.order = item_depot.order  # type: list
         self.embedding_manager = embedding_manager  # type: EmbeddingManager
 
     def get_vocabs(self) -> Optional[List[Vocab]]:
         raise NotImplementedError
 
-    def sample_rebuilder(self, sample: dict):
+    def sample_rebuilder(self, sample: dict, target: str):
         raise NotImplementedError
 
     def get_mask(self, batched_samples: Dict[str, torch.Tensor]):

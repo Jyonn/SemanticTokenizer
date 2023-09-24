@@ -2,10 +2,14 @@ from typing import Dict, Union
 
 import torch
 from UniTok import Vocab
+from tensorboard.plugins.projector import EmbeddingInfo
 from torch import nn
 
 from loader.embedding.embedding_loader import EmbeddingLoader
+from model.utils.base_classifier import BaseClassifier
 from utils.printer import printer, Color
+
+from loader.item_depot import ItemDepot
 
 
 class TransformEmbedding(nn.Module):
@@ -44,6 +48,8 @@ class EmbeddingManager:
         self._col_to_vocab = dict()
         self._vocab_to_size = dict()
         self._table = nn.ModuleDict()
+        self._classifier = nn.ModuleDict()  # type: Dict[str, BaseClassifier]
+        self._voc_map = dict()
 
         self.hidden_size = hidden_size
         self.same_dim_transform = same_dim_transform
@@ -53,6 +59,12 @@ class EmbeddingManager:
 
     def get_table(self):
         return self._table
+
+    def get_classifier(self):
+        return self._classifier
+
+    def get_vocab_map(self):
+        return self._voc_map
 
     def get(self, col, as_vocab=False):
         vocab = col if as_vocab else self._col_to_vocab[col]
@@ -68,6 +80,15 @@ class EmbeddingManager:
     def build_vocab_embedding(self, vocab_name, vocab_size):
         if vocab_name in self._table:
             return
+
+        self._classifier.add_module(vocab_name, BaseClassifier(
+            vocab_size=vocab_size,
+            hidden_size=self.hidden_size,
+            activation_function='gelu',
+            layer_norm_eps=1e-5,
+        ))
+
+        self._voc_map[vocab_name] = len(self._voc_map)
 
         if vocab_name in self._pretrained:
             embedding_info = self._pretrained[vocab_name]
@@ -119,8 +140,8 @@ class EmbeddingManager:
         self._vocab_to_size[vocab_name] = vocab_size
         self.build_vocab_embedding(vocab_name, vocab_size)
 
-    def register_depot(self, nrd: NRDepot, skip_cols=None):
-        depot, order = nrd.depot, nrd.order
+    def register_depot(self, item_depot: ItemDepot, skip_cols=None):
+        depot, order = item_depot.depot, item_depot.order
         skip_cols = skip_cols or []
         skip_vocabs = [depot.get_vocab(col) for col in skip_cols]
 

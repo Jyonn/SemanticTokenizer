@@ -1,0 +1,7 @@
+name: bart-token
+embeddings:
+  -
+    vocab_name: bart
+    vocab_type: numpy
+    path: data/bart-token.npy
+    frozen: ${frozen}$

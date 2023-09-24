@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Literal
 
 import torch
 from UniTok import Vocab
@@ -24,17 +24,26 @@ class Pointer:
 class ConcatInputer(BaseInputer):
     vocab = Vocab(name='__cat_inputer_special_ids')
     PAD = vocab.append('[PAD]')
-    CLS = vocab.append('[CLS]')
+    BOS = vocab.append('[BOS]')
     SEP = vocab.append('[SEP]')
+    EOS = vocab.append('[EOS]')
 
-    def __init__(self, use_cls_token, use_sep_token, **kwargs):
+    ENCODER = 'encoder'
+    DECODER = 'decoder'
+
+    def __init__(self, use_sep_token, **kwargs):
         super().__init__(**kwargs)
 
-        self.use_cls_token = use_cls_token
+        self.vocab_map = self.embedding_manager.get_vocab_map()
         self.use_sep_token = use_sep_token
 
         self.max_content_len = self.get_max_content_len()
-        self.max_sequence_len = self.max_content_len + int(self.use_cls_token) + int(self.use_sep_token) * len(self.order)
+        self.max_sequence_len = (
+                self.max_content_len +  # content
+                1 +  # bos
+                int(self.use_sep_token) * (len(self.order) - 1) +  # sep
+                1  # eos
+        )
 
     def get_max_content_len(self):
         length = 0
@@ -48,13 +57,42 @@ class ConcatInputer(BaseInputer):
     def get_empty_input(self):
         return torch.ones(self.max_sequence_len, dtype=torch.long) * Setting.UNSET
 
-    def sample_rebuilder(self, sample: OrderedDict):
+    def get_autoregressive_labels(self, sample: OrderedDict):
+        pointer = Pointer()
+        labels = self.get_empty_input()
+        pointer_voc = Pointer()
+        label_voc = self.get_empty_input()
+
+        for col in self.order:
+            value = sample[col]
+            if not isinstance(value, list):
+                value = [value]
+            value = torch.tensor(value, dtype=torch.long)
+
+            pointer.update_input(labels, value)
+            voc_id = self.vocab_map[self.depot.cols[col].voc.name]
+            pointer_voc.update_input(label_voc, torch.ones_like(value) * voc_id)
+
+            if self.use_sep_token and col != self.order[-1]:
+                pointer.update_special_token(labels, self.SEP)
+                pointer_voc.update_special_token(label_voc, self.vocab_map[self.vocab.name])
+
+        pointer.update_special_token(labels, self.EOS)
+        pointer_voc.update_special_token(label_voc, self.vocab_map[self.vocab.name])
+
+        return dict(
+            labels=labels,
+            label_voc=label_voc,
+        )
+
+    def sample_rebuilder(self, sample: OrderedDict, target: Literal['encoder', 'decoder']):
         pointer = Pointer()
         input_ids = OrderedDict()
 
         special_ids = self.get_empty_input()
-        if self.use_cls_token:
-            pointer.update_special_token(special_ids, self.CLS)
+
+        if target == self.DECODER:
+            pointer.update_special_token(special_ids, self.BOS)
 
         for col in self.order:
             value = sample[col]
@@ -66,8 +104,11 @@ class ConcatInputer(BaseInputer):
             pointer.update_input(input_id, value)
             input_ids[col] = input_id
 
-            if self.use_sep_token:
+            if self.use_sep_token and col != self.order[-1]:
                 pointer.update_special_token(special_ids, self.SEP)
+
+        if target == self.ENCODER:
+            pointer.update_special_token(special_ids, self.EOS)
 
         input_ids[self.vocab.name] = special_ids
         attention_mask = torch.tensor([1] * pointer.pos + [0] * (self.max_sequence_len - pointer.pos), dtype=torch.long)
@@ -103,4 +144,5 @@ class ConcatInputer(BaseInputer):
             embedding *= mask.unsqueeze(-1)
 
             input_embeddings += embedding
+
         return input_embeddings

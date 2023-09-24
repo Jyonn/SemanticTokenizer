@@ -1,0 +1,11 @@
+name: MIND
+base_dir: data/MIND
+items:
+  depot: ${data.base_dir}/news
+  order:
+    - title
+    - abs
+    - cat
+    - subcat
+  append:
+    - nid
