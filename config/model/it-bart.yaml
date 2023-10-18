@@ -1,0 +1,7 @@
+name: Bart
+config:
+  embed_dim: 768
+  num_heads: 3
+  num_codes: 512
+  use_sep_token: true
+  skip_quant: true

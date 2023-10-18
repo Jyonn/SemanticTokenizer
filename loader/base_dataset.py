@@ -1,6 +1,7 @@
 from collections import OrderedDict
 
 from torch.utils.data import Dataset
+from tqdm import tqdm
 
 from model.inputer.concat_inputer import ConcatInputer
 from loader.item_depot import ItemDepot
@@ -72,6 +73,6 @@ class BaseDataset(Dataset):
     def cache(self):
         self._cached = False
         self._cache = []
-        for i in range(len(self)):
+        for i in tqdm(range(len(self))):
             self._cache.append(self[i])
         self._cached = True

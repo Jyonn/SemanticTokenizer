@@ -4,19 +4,21 @@ import os
 import sys
 import time
 
+import numpy as np
+import pigmento
 import torch
 from oba import Obj
+from pigmento import pnt
 from tqdm import tqdm
+from transformers import get_linear_schedule_with_warmup
 
 from loader.config_manager import ConfigManager
 from loader.global_setting import Setting, Status
-from model.it import ITOutput
+from model.it import ITOutput, IT
 from utils.config_init import ConfigInit
 from utils.gpu import GPU
-from utils.logger import Logger
 from utils.meaner import Meaner
 from utils.monitor import Monitor
-from utils.printer import printer, Color, Printer
 from utils.structure import Structure
 
 
@@ -27,12 +29,13 @@ class Worker:
         self.data, self.embed, self.model, self.exp = \
             self.config.data, self.config.embed, self.config.model, self.config.exp
         self.disable_tqdm = self.exp.policy.disable_tqdm
+        self.mode = self.exp.mode
 
-        self.print = printer[('MAIN', '·', Color.CYAN)]
-        Printer.logger = Logger(self.exp.log)
-        self.print('START TIME:', datetime.datetime.now())
-        self.print(' '.join(sys.argv))
-        self.print(json.dumps(Obj.raw(self.config), indent=4))
+        self.init_pigmento()
+
+        pnt('START TIME:', datetime.datetime.now())
+        pnt(' '.join(sys.argv))
+        pnt(json.dumps(Obj.raw(self.config), indent=4))
 
         Setting.device = self.get_device()
 
@@ -43,15 +46,28 @@ class Worker:
             exp=self.exp,
         )
 
-        self.it = self.config_manager.it
+        self.it = self.config_manager.it  # type: IT
+        self.it.to(Setting.device)
 
         self.m_optimizer = None
         self.m_scheduler = None
         self.load_path = self.parse_load_path()
 
+        pnt(self.config_manager.item_depot.depot[0])
+        pnt(Structure().analyse_and_stringify(self.config_manager.sets.a_set()[0]))
+
+    def init_pigmento(self):
+        pigmento.add_time_prefix()
+        pigmento.add_log_plugin(self.exp.log)
+        pigmento.add_dynamic_color_plugin()
+        pnt.set_display_mode(
+            display_method_name=False,
+            display_class_name=True,
+        )
+
     def load(self, path):
         while True:
-            self.print(f"load model from exp {path}")
+            pnt(f"load model from exp {path}")
             try:
                 state_dict = torch.load(path, map_location=Setting.device)
                 break
@@ -70,16 +86,13 @@ class Worker:
             self.m_optimizer.load_state_dict(state_dict['optimizer'])
             self.m_scheduler.load_state_dict(state_dict['scheduler'])
 
-        self.print(self.config_manager.item_depot[0])
-        self.print(Structure().analyse_and_stringify(self.config_manager.sets.a_set()[0]))
-
     def get_device(self):
         cuda = self.config.cuda
         if cuda in ['-1', -1] or cuda is False:
-            self.print('choose cpu')
+            pnt('choose cpu')
             return 'cpu'
         if isinstance(cuda, int) or isinstance(cuda, str):
-            self.print(f'User select cuda {cuda}')
+            pnt(f'User select cuda {cuda}')
             return f"cuda:{cuda}"
         return GPU.auto_choose(torch_format=True)
 
@@ -97,12 +110,17 @@ class Worker:
 
         return [os.path.join(save_dir, f'epoch_{epoch}.bin') for epoch in epochs]
 
-    def log_interval(self, epoch, step, loss):
-        self.print[f'epoch {epoch}'](f'step {step}, loss {loss:.4f}')
+    def log_interval(self, epoch, step, loss_dict):
+        line = ', '.join([f'{metric} {loss_dict[metric]:.4f}' for metric in loss_dict])
+        pnt[f'epoch {epoch}'](f'step {step}, {line}')
 
-    def log_epoch(self, epoch, results):
+    def log_epoch(self, epoch, loss_dict):
+        line = ', '.join([f'{metric} {loss_dict[metric]:.4f}' for metric in loss_dict])
+        pnt[f'epoch {epoch}'](line)
+
+    def log_test(self, results):
         line = ', '.join([f'{metric} {results[metric]:.4f}' for metric in results])
-        self.print[f'epoch {epoch}'](line)
+        pnt['test'](line)
 
     def train(self) -> int:
         monitor_kwargs = Obj.raw(self.exp.store)
@@ -121,10 +139,12 @@ class Worker:
         for epoch in range(self.exp.policy.epoch_start, self.exp.policy.epoch + self.exp.policy.epoch_start):
             # loader.start_epoch(epoch - self.exp.policy.epoch_start, self.exp.policy.epoch)
             self.it.train()
-            loader.train()
             for step, batch in enumerate(tqdm(loader, disable=self.disable_tqdm)):
                 res = self.it(batch=batch)  # type: ITOutput
-                loss = res.quantization_loss * self.exp.policy.quant_weight + res.generation_loss
+                loss = (res.generation_loss +
+                        res.quantization_loss * self.exp.policy.quant_weight +
+                        res.reconstruction_loss * self.exp.policy.recon_weight +
+                        res.kl_divergence * self.exp.policy.kl_weight)
                 loss.backward()
 
                 accumulate_step += 1
@@ -135,13 +155,19 @@ class Worker:
                     accumulate_step = 0
 
                 if self.exp.policy.check_interval:
+                    loss_dict = res.voc_loss
+                    loss_dict.update(dict(
+                        gen_loss=res.generation_loss.item(),
+                        quant_loss=res.quantization_loss.item(),
+                        recon_loss=res.reconstruction_loss.item(),
+                        kl=res.kl_divergence.item(),
+                    ))
                     if self.exp.policy.check_interval < 0:  # step part
                         if (step + 1) % max(train_steps // (-self.exp.policy.check_interval), 1) == 0:
-                            self.log_interval(epoch, step, loss.item())
+                            self.log_interval(epoch, step, loss_dict=loss_dict)
                     else:
                         if (step + 1) % self.exp.policy.check_interval == 0:
-                            self.log_interval(epoch, step, loss.item())
-
+                            self.log_interval(epoch, step, loss_dict=loss_dict)
                 if self.exp.policy.epoch_batch:
                     if self.exp.policy.epoch_batch < 0:  # step part
                         if step > max(train_steps // (-self.exp.policy.epoch_batch), 1):
@@ -166,7 +192,7 @@ class Worker:
             if early_stop == -1:
                 return monitor.get_best_epoch()
 
-        self.print('Training Ended')
+        pnt('Training Ended')
         monitor.export()
 
         return monitor.get_best_epoch()
@@ -175,30 +201,128 @@ class Worker:
         loader = self.config_manager.get_loader(status)
 
         total_loss = Meaner()
+        quant_loss = Meaner()
+        gen_loss = Meaner()
+        recon_loss = Meaner()
+        kl = Meaner()
 
         for step, batch in enumerate(tqdm(loader, disable=self.disable_tqdm)):
             with torch.no_grad():
                 res = self.it(batch=batch)  # type: ITOutput
-                loss = res.quantization_loss * self.exp.policy.quant_weight + res.generation_loss
+                # loss = res.quantization_loss * self.exp.policy.quant_weight + res.generation_loss
+                loss = (res.generation_loss +
+                        res.quantization_loss * self.exp.policy.quant_weight +
+                        res.reconstruction_loss * self.exp.policy.recon_weight +
+                        res.kl_divergence * self.exp.policy.kl_weight)
             total_loss.add(loss.item())
+            quant_loss.add(res.quantization_loss.item())
+            gen_loss.add(res.generation_loss.item())
+
+            recon_loss.add(res.reconstruction_loss.item())
+            kl.add(res.kl_divergence.item())
 
         total_loss = total_loss.mean()
-        return dict(loss=total_loss), total_loss
+        quant_loss = quant_loss.mean()
+        gen_loss = gen_loss.mean()
+        recon_loss = recon_loss.mean()
+        kl = kl.mean()
+        return dict(
+            loss=total_loss,
+            quant_loss=quant_loss,
+            gen_loss=gen_loss,
+            recon_loss=recon_loss,
+            kl=kl,
+        ), total_loss
 
     def dev(self):
         return self.evaluate(Status.DEV)
 
     def test(self):
-        return self.evaluate(Status.TEST)
+        results, _ = self.evaluate(Status.TEST)
+        self.log_test(results)
+
+    def train_runner(self):
+        param_set = set()
+        self.m_optimizer = torch.optim.Adam(
+            params=filter(lambda p: p.requires_grad, self.it.parameters()),
+            lr=self.exp.policy.lr
+        )
+        self.m_scheduler = get_linear_schedule_with_warmup(
+            self.m_optimizer,
+            num_warmup_steps=self.exp.policy.n_warmup,
+            num_training_steps=len(
+                self.config_manager.sets.train_set) // self.exp.policy.batch_size * self.exp.policy.epoch,
+        )
+
+        for name, p in self.it.named_parameters():  # type: str, torch.Tensor
+            if p.requires_grad:
+                param_key = '.'.join(name.split('.')[:2])
+                if param_key not in param_set:
+                    param_set.add(param_key)
+                    pnt(param_key)
+
+        if self.load_path:
+            self.load(self.load_path[0])
+        return self.train()
+
+    def iter_runner(self, handler):
+        if self.load_path:
+            for path in self.load_path:
+                self.load(path)
+                handler()
+        else:
+            handler()
+
+    def display(self):
+        pnt(self.config_manager.sets.a_set()[0])
+
+    def export(self):
+        store_dir = self.exp.store.export_dir
+
+        code_embeds = self.it.get_code_embeddings()
+        code_embeds = code_embeds.detach().cpu().numpy()
+        np.save(os.path.join(store_dir, 'code_embeds.npy'), code_embeds)
+
+        num_items = len(self.config_manager.item_depot.depot)
+        num_heads = self.it.config.num_heads
+        code_matrix = np.zeros((num_items, num_heads), dtype=np.int32) - 1
+
+        with torch.no_grad():
+            for status in [Status.TRAIN, Status.DEV, Status.TEST]:
+                loader = self.config_manager.get_loader(status)
+                for step, batch in enumerate(tqdm(loader, disable=self.disable_tqdm)):
+                    item_ids, codes = self.it.get_codes(batch=batch)
+                    item_ids = item_ids.detach().cpu().numpy()
+                    codes = codes.cpu().numpy()
+                    code_matrix[item_ids] = codes
+
+        np.save(os.path.join(store_dir, 'codes.npy'), code_matrix)
+
+        pnt(f'export to {store_dir}')
 
     def run(self):
-        pass
+        if self.mode == 'train':
+            self.train_runner()
+        elif self.mode == 'train_test':
+            best_epoch = self.train_runner()
+            pnt('best epoch', best_epoch)
+            self.load(os.path.join(self.exp.dir, f'epoch_{best_epoch}.bin'))
+            self.test()
+        elif self.mode == 'test':
+            self.iter_runner(self.test)
+        elif self.mode == 'display':
+            self.display()
+        elif self.mode == 'export':
+            self.load(self.load_path[0])
+            self.export()
 
 
 if __name__ == '__main__':
     configuration = ConfigInit(
-        required_args=['data', 'model', 'exp', 'embed'],
+        required_args=['data', 'exp'],
         default_args=dict(
+            model='config/model/it.yaml',
+            embed='config/embed/bart.yaml',
             warmup=0,
             batch_size=64,
             lr=0.0001,
@@ -206,6 +330,11 @@ if __name__ == '__main__':
             epoch_start=0,
             frozen=True,
             load_path=None,
+            acc_batch=1,
+
+            quant=1.0,
+            recon=1.0,
+            kl=1.0,
         ),
         makedirs=[
             'exp.dir',
@@ -214,4 +343,3 @@ if __name__ == '__main__':
 
     worker = Worker(config=configuration)
     worker.run()
-

@@ -1,0 +1,8 @@
+name: VAE-Quant-H${model.config.num_heads}
+config:
+  embed_dim: 768
+  num_heads: ${heads}$
+  num_codes: 512
+  use_sep_token: true
+  vae_quant: true
+  commitment_cost: ${cost}$

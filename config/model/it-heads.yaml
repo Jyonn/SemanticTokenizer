@@ -1,0 +1,7 @@
+name: H${model.config.num_heads}-C${model.config.num_codes}
+config:
+  embed_dim: 768
+  num_heads: ${heads}$
+  num_codes: ${codes}$
+  use_sep_token: true
+  commitment_cost: ${cost}$

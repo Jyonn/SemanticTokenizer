@@ -1,0 +1,8 @@
+name: KD-H${heads}-C${codes}
+config:
+  embed_dim: 768
+  num_heads: ${heads}$
+  num_codes: ${codes}$
+  commitment_cost: ${cost}$
+  use_sep_token: true
+  kd: true

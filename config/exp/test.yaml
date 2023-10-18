@@ -1,0 +1,24 @@
+name: ${exp.mode}
+dir: saving/${data.name}/${model.name}/${exp.name}
+log: ${exp.dir}/exp.log
+mode: test
+load:
+  save_dir: ${load_path}$
+  epochs: null
+  model_only: true
+  strict: true
+  wait: false
+store:
+  top: 1
+  early_stop: ${patience}$
+policy:
+  quant_weight: 1.0
+  epoch_start: ${epoch_start}$
+  epoch: 50
+  lr: ${lr}$
+  pin_memory: false
+  batch_size: ${batch_size}$
+  accumulate_batch: ${acc_batch}$
+  device: gpu
+  n_warmup: ${warmup}$
+  check_interval: -2

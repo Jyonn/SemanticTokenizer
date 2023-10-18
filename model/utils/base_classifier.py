@@ -3,8 +3,6 @@ from torch import nn
 from transformers import BartConfig, BertConfig
 from transformers.activations import ACT2FN
 
-from utils.printer import printer, Color
-
 
 class TransformLayer(nn.Module):
     def __init__(
@@ -54,7 +52,6 @@ class BaseClassifier(nn.Module):
         super(BaseClassifier, self).__init__()
 
         self.vocab_size = vocab_size
-        self.print = printer[(self.__class__.__name__, '-', Color.YELLOW)]
 
         self.transform_layer = TransformLayer(
             hidden_size=hidden_size,

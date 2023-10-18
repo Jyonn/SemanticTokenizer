@@ -4,7 +4,7 @@ import torch
 from UniTok import Vocab, UniDep
 
 from loader.embedding.embedding_manager import EmbeddingManager
-from model.utils.nr_depot import ItemDepot
+from loader.item_depot import ItemDepot
 
 
 class BaseInputer:

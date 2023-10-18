@@ -1,29 +1,31 @@
 import torch
 from UniTok import UniDep
 from oba import Obj
+from pigmento import pnt
 from torch import nn
 
 from torch.utils.data import DataLoader
 
 from loader.global_setting import Status
+from loader.item_depot import ItemDepot
 from model.inputer.concat_inputer import ConcatInputer
 from loader.embedding.embedding_manager import EmbeddingManager
 
 from model.it import IT, ITConfig
-from model.utils.nr_depot import ItemDepot
 from loader.base_dataset import BaseDataset
-from utils.printer import printer, Color
 
 from utils.splitter import Splitter
 
 
 class Datasets:
     def get_dataset(self, status: str):
-        return BaseDataset(
+        dataset = BaseDataset(
             inputer=self.inputer,
             splitter=self.splitter,
             status=status,
         )
+        # dataset.cache()
+        return dataset
 
     def __init__(self, inputer: ConcatInputer):
         self.inputer = inputer
@@ -57,15 +59,13 @@ class ConfigManager:
         self.model = model
         self.exp = exp
 
-        self.print = printer[(self.__class__.__name__, '|', Color.CYAN)]
-
-        self.print('load depots ...')
+        pnt('load depots ...')
         self.item_depot = ItemDepot(
             depot=self.data.items.depot,
             order=self.data.items.order,
             append=self.data.items.append,
         )
-        self.print('item size: ', len(self.item_depot.depot))
+        pnt('item size: ', len(self.item_depot.depot))
         if self.data.items.union:
             for depot in self.data.items.union:
                 self.item_depot.depot.union(UniDep(depot))
@@ -75,39 +75,39 @@ class ConfigManager:
             **Obj.raw(self.model.config),
         )
 
-        self.print('build embedding manager ...')
+        pnt('build embedding manager ...')
         self.embedding_manager = EmbeddingManager(
             hidden_size=self.it_config.embed_dim,
             same_dim_transform=self.model.config.same_dim_transform,
         )
 
-        self.print('load pretrained embeddings ...')
+        pnt('load pretrained embeddings ...')
         for embedding_info in self.embed.embeddings:
             self.embedding_manager.load_pretrained_embedding(**Obj.raw(embedding_info))
 
-        self.print('register embeddings ...')
+        pnt('register embeddings ...')
         self.embedding_manager.register_depot(self.item_depot)
         self.embedding_manager.register_vocab(ConcatInputer.vocab)
 
-        self.print('set <pad> embedding to zeros ...')
+        pnt('set <pad> embedding to zeros ...')
         cat_embeddings = self.embedding_manager(ConcatInputer.vocab.name)  # type: nn.Embedding
         cat_embeddings.weight.data[ConcatInputer.PAD] = torch.zeros_like(cat_embeddings.weight.data[ConcatInputer.PAD])
 
-        self.print('build inputer')
+        pnt('build inputer')
         self.inputer = ConcatInputer(
             item_depot=self.item_depot,
             embedding_manager=self.embedding_manager,
             use_sep_token=self.model.config.use_sep_token,
         )
 
-        self.print('build recommender model and manager ...')
+        pnt('build bart model ...')
         self.it = IT(
             config=self.it_config,
             inputer=self.inputer,
             embedding_manager=self.embedding_manager,
         )
 
-        self.print('build datasets ...')
+        pnt('build datasets ...')
         self.sets = Datasets(inputer=self.inputer)
 
     def get_loader(self, status):

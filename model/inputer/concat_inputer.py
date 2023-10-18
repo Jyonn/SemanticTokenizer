@@ -120,7 +120,7 @@ class ConcatInputer(BaseInputer):
         )
 
     def get_mask(self, batched_samples: Dict[str, torch.Tensor]):
-        return batched_samples['attention_mask']
+        return batched_samples['attention_mask'].to(Setting.device)
 
     def get_embeddings(
             self,

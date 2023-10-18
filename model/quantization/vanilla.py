@@ -23,7 +23,7 @@ class VanillaQuantization(BaseQuantization):
             embeds,  # [B, D]
             with_loss=False,
     ) -> VanillaQuantizationOutput:
-        dist = torch.cdist(embeds, self.codebooks.weight, p=2)
+        dist = torch.cdist(embeds, self.codebook.weight, p=2)
         indices = torch.argmin(dist, dim=-1).unsqueeze(1)
         ph = torch.zeros(indices.shape[0], self.num_codes, device=embeds.device)  # [B, C]
         ph.scatter_(1, indices, 1)

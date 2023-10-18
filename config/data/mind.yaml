@@ -1,5 +1,5 @@
-name: MIND
-base_dir: data/MIND
+name: MIND-${version}
+base_dir: data/MIND-${version}
 items:
   depot: ${data.base_dir}/news
   order:
