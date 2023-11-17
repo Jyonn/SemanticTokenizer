@@ -22,6 +22,11 @@ from utils.monitor import Monitor
 from utils.structure import Structure
 
 
+torch.autograd.set_detect_anomaly(True)
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+
 class Worker:
     def __init__(self, config):
         self.config = config
@@ -112,15 +117,28 @@ class Worker:
 
     def log_interval(self, epoch, step, loss_dict):
         line = ', '.join([f'{metric} {loss_dict[metric]:.4f}' for metric in loss_dict])
-        pnt[f'epoch {epoch}'](f'step {step}, {line}')
+        pnt(f'[epoch {epoch}] step {step}, {line}')
 
     def log_epoch(self, epoch, loss_dict):
         line = ', '.join([f'{metric} {loss_dict[metric]:.4f}' for metric in loss_dict])
-        pnt[f'epoch {epoch}'](line)
+        pnt(f'[epoch {epoch}] {line}')
 
     def log_test(self, results):
         line = ', '.join([f'{metric} {results[metric]:.4f}' for metric in results])
-        pnt['test'](line)
+        pnt(f'[test] {line}')
+
+    def init(self):
+        loader = self.config_manager.get_loader(Status.TRAIN)
+        with torch.no_grad():
+            embeds = []
+            for step, batch in enumerate(tqdm(loader, disable=self.disable_tqdm)):
+                embed = self.it.init(batch=batch).detach().cpu()
+                embeds.append(embed)
+            embeds = torch.cat(embeds, dim=0)
+
+            self.it.cpu()
+            self.it.quantizer.initialize(embeds=embeds)
+            self.it.to(Setting.device)
 
     def train(self) -> int:
         monitor_kwargs = Obj.raw(self.exp.store)
@@ -133,6 +151,8 @@ class Worker:
         train_steps = len(self.config_manager.sets.train_set) // self.exp.policy.batch_size
         accumulate_step = 0
         accumulate_batch = self.exp.policy.accumulate_batch or 1
+
+        self.init()
 
         loader = self.config_manager.get_loader(Status.TRAIN)
         self.m_optimizer.zero_grad()
@@ -241,6 +261,21 @@ class Worker:
         results, _ = self.evaluate(Status.TEST)
         self.log_test(results)
 
+    def visualize(self):
+        universal_decode = self.config_manager.embedding_manager.universal_decode
+        loader = self.config_manager.get_loader(Status.TRAIN)
+        for step, batch in enumerate(tqdm(loader, disable=self.disable_tqdm)):
+            res: ITOutput = self.it(batch=batch, visualize=True)
+            true_labels, pred_labels = res.true_labels, res.pred_labels
+            batch_size = true_labels.shape[0]
+
+            for i_batch in range(min(batch_size, 10)):
+                pnt(f'true: {universal_decode(true_labels[i_batch])}')
+                pnt(f'pred: {universal_decode(pred_labels[i_batch])}')
+                pnt('')
+
+            break
+
     def train_runner(self):
         param_set = set()
         self.m_optimizer = torch.optim.Adam(
@@ -279,9 +314,9 @@ class Worker:
     def export(self):
         store_dir = self.exp.store.export_dir
 
-        code_embeds = self.it.get_code_embeddings()
-        code_embeds = code_embeds.detach().cpu().numpy()
-        np.save(os.path.join(store_dir, 'code_embeds.npy'), code_embeds)
+        codebooks = self.it.get_codebooks()
+        # codebooks = codebooks.detach().cpu().numpy()
+        np.save(os.path.join(store_dir, 'codebooks.npy'), codebooks)
 
         num_items = len(self.config_manager.item_depot.depot)
         num_heads = self.it.config.num_heads
@@ -315,6 +350,9 @@ class Worker:
         elif self.mode == 'export':
             self.load(self.load_path[0])
             self.export()
+        elif self.mode == 'visualize':
+            self.load(self.load_path[0])
+            self.visualize()
 
 
 if __name__ == '__main__':

@@ -48,12 +48,15 @@ class EmbeddingManager:
         self._col_to_vocab = dict()
         self._vocab_to_size = dict()
         self._table = nn.ModuleDict()
-        self._classifier = nn.ModuleDict()  # type: Dict[str, BaseClassifier]
+        self._classifier = nn.ModuleDict()
         self._voc_map = dict()
 
         self.hidden_size = hidden_size
         self.same_dim_transform = same_dim_transform
         self._pretrained = dict()  # type: Dict[str, EmbeddingInfo]
+
+        self._universal_vocab = Vocab(name='__universal__')
+        self._reverse_universal_vocab_index = dict()
 
     def get_table(self):
         return self._table
@@ -74,6 +77,15 @@ class EmbeddingManager:
     def load_pretrained_embedding(self, vocab_name, **kwargs):
         self._pretrained[vocab_name] = EmbeddingLoader(**kwargs).load()
         pnt(f'load pretrained embedding {vocab_name} of {self._pretrained[vocab_name].embedding.shape}')
+
+    def universal_mapper(self, vocab_name):
+        mapper: dict = self._reverse_universal_vocab_index[vocab_name]
+        return lambda x: mapper[x]
+
+    def universal_decode(self, tokens):
+        if isinstance(tokens, torch.Tensor):
+            tokens = tokens.cpu().tolist()
+        return ' '.join([self._universal_vocab[t] for t in tokens])
 
     def build_vocab_embedding(self, vocab_name, vocab_size):
         if vocab_name in self._table:
@@ -128,11 +140,23 @@ class EmbeddingManager:
     def clone_vocab(self, col_name, clone_col_name):
         self._col_to_vocab[col_name] = self._col_to_vocab[clone_col_name]
 
+    def _build_universal_vocab(self, vocab: Vocab):
+        self._universal_vocab.extend(list(vocab))
+        reverse_universal_vocab_index = dict()
+        for i in range(len(vocab)):
+            reverse_universal_vocab_index[i] = self._universal_vocab.o2i[vocab[i]]
+        self._reverse_universal_vocab_index[vocab.name] = reverse_universal_vocab_index
+
     def register_vocab(self, vocab_name: Union[str, Vocab], vocab_size=None):
         if isinstance(vocab_name, Vocab):
+            self._build_universal_vocab(vocab_name)
             vocab_name, vocab_size = vocab_name.name, len(vocab_name)
         else:
             assert vocab_size is not None, f'vocab size is required for {vocab_name}'
+            self._universal_vocab.extend([f'__{vocab_name}_{i}' for i in range(vocab_size)])
+            reverse_universal_vocab_index = dict()
+            for i in range(vocab_size):
+                reverse_universal_vocab_index[i] = self._universal_vocab.o2i[f'__{vocab_name}_{i}']
 
         self._col_to_vocab[vocab_name] = vocab_name
         self._vocab_to_size[vocab_name] = vocab_size
@@ -158,3 +182,4 @@ class EmbeddingManager:
                 continue
             self._vocab_to_size[vocab_name] = vocab_size
             self.build_vocab_embedding(vocab_name, vocab_size)
+            self._build_universal_vocab(depot.vocs[vocab_name].vocab)

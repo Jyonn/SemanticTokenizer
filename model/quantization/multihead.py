@@ -35,6 +35,13 @@ class MultiHeadQuantization(BaseQuantization):
             for _ in range(self.num_heads)
         ])  # type: nn.ModuleList[BaseQuantization]
 
+    def initialize(
+            self,
+            embeds: torch.Tensor
+    ):
+        for i in range(self.num_heads):
+            self.quantizers[i].initialize(embeds[:, i, :])
+
     def quantize(
             self,
             embeds,  # [B, H, D]

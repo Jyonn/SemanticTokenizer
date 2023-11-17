@@ -1,3 +1,4 @@
+import torch
 from torch import nn
 
 
@@ -32,6 +33,12 @@ class BaseQuantization(nn.Module):
         self.embed_dim = dim
         self.num_codes = num_codes
         self.commitment_cost = commitment_cost
+
+    def initialize(
+            self,
+            embeds: torch.Tensor
+    ):
+        raise NotImplementedError
 
     def quantize(
             self,

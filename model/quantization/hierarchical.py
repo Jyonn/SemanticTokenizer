@@ -33,6 +33,14 @@ class HierarchicalQuantization(BaseQuantization):
             for i in range(self.num_heads)
         ])  # type: nn.ModuleList[VanillaQuantization]
 
+    def initialize(
+            self,
+            embeds: torch.Tensor
+    ):
+        for i in range(self.num_heads):
+            self.quantizers[i].initialize(embeds)
+            embeds = self.quantizers[i].codebook.weight.data
+
     # noinspection PyMethodMayBeStatic
     def get_next_layer_embeds(
             self,

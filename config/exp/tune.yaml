@@ -16,7 +16,7 @@ policy:
   recon_weight: ${recon}$
   kl_weight: ${kl}$
   epoch_start: ${epoch_start}$
-  epoch: 50
+  epoch: 500
   lr: ${lr}$
   pin_memory: false
   batch_size: ${batch_size}$
