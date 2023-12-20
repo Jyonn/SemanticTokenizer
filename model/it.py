@@ -1,3 +1,5 @@
+import os
+
 import torch
 from pigmento import pnt
 from torch import nn
@@ -119,7 +121,10 @@ class IT(nn.Module):
         self.embedding_manager = embedding_manager
         self.embedding_table = embedding_manager.get_table()
 
-        self.bart = BartModel.from_pretrained('facebook/bart-base')  # type: BartModel
+        bart_path = '/data1/qijiong/Code/bart-base'
+        if not os.path.exists(bart_path):
+            bart_path = 'facebook/bart-base'
+        self.bart = BartModel.from_pretrained(bart_path)  # type: BartModel
 
         self.back_outer_proj = nn.Linear(self.max_sequence_len, self.config.num_heads)
         # self.back_inner_proj = nn.Linear(self.config.embed_dim, self.config.hidden_size)
@@ -158,7 +163,9 @@ class IT(nn.Module):
                 dim=-1,
             )
 
-        self.classifier = self.embedding_manager.get_classifier()
+        self.is_residual_vq = isinstance(self.quantizer, ResidualQuantizationV2)
+        # self.classifier = self.embedding_manager.get_classifier()
+        self.classifier = self.embedding_manager.get_universal_classifier()
         self.loss_fct = nn.CrossEntropyLoss()
 
         if self.config.kd:
@@ -197,6 +204,12 @@ class IT(nn.Module):
         encoder_attention_mask = self.inputer.get_mask(batch['encoder'])
         decoder_attention_mask = self.inputer.get_mask(batch['decoder'])
         decoder_input_embeddings = self.inputer.get_embeddings(batch['decoder'])
+
+        if self.is_residual_vq:
+            seq_len = encoder_attention_mask.shape[1]
+            input_hidden_states = input_hidden_states.unsqueeze(dim=1).repeat(1, seq_len, 1)
+            encoder_attention_mask = torch.zeros_like(encoder_attention_mask)
+            encoder_attention_mask[:, 0] = 1
 
         output: BaseModelOutput = self.bart.decoder(
             inputs_embeds=decoder_input_embeddings,
@@ -252,21 +265,13 @@ class IT(nn.Module):
         return input_hidden_states, quantized, kl_divergence
 
     def quant(self, encoder_hidden_states: torch.Tensor):
-        embeds = self.back_outer_proj(encoder_hidden_states.transpose(1, 2)).transpose(1, 2)
-        embeds = self.back_inner_proj(embeds)
+        embeds = self.attention(encoder_hidden_states)
         quantized = self.quantizer(embeds)
-        quantized_embeds = torch.stack(quantized.embeds, dim=1)  # [B, H, D]
-        # quantized_embeds = self.forth_inner_proj(quantized_embeds)
-        # input_hidden_states = self.forth_outer_proj(quantized_embeds.transpose(1, 2)).transpose(1, 2)
+        input_hidden_states = quantized.embeds  #
         kl_divergence = torch.tensor(0, dtype=torch.float).to(Setting.device)
-        # return input_hidden_states, quantized, kl_divergence
-        return quantized_embeds, quantized, kl_divergence
+        return input_hidden_states, quantized, kl_divergence
 
     def get_codebooks(self):
-        # embeds = [qt.codebook.weight for qt in self.quantizer.quantizers]  # H x [C, D]
-        # # stack to [H, C, D]
-        # embeds = torch.stack(embeds, dim=0)
-        # return embeds
         return self.quantizer.get_codebooks()
 
     def get_codes(self, batch: dict):
@@ -274,24 +279,52 @@ class IT(nn.Module):
 
         # noinspection PyArgumentList
         _, quantized, _ = self.handler(encoder_hidden_states)
-        indices = torch.stack(quantized.indices, dim=1)  # [B, H]
+        # pnt(quantized.indices.shape)
+        indices = quantized.indices
+        if isinstance(indices, list):  # for multihead quantization
+            indices = torch.stack(quantized.indices, dim=1)  # [B, H]
         item_ids = batch['append'][self.depot.id_col]  # [B]
 
         return item_ids, indices.squeeze()
 
     def init(self, batch: dict):
         encoder_hidden_states: torch.Tensor = self._encode(batch)
-
-        embeds = self.back_outer_proj(encoder_hidden_states.transpose(1, 2)).transpose(1, 2)
-        embeds = self.back_inner_proj(embeds)
+        embeds = self.attention(encoder_hidden_states)
         return embeds
+
+    def generate(self, codes):
+        codebooks = self.get_codebooks()
+        code_embeds = codebooks[codes]
+
+        # auto-regressive decoding
+
+
+
+        # encoder_attention_mask = self.inputer.get_mask(batch['encoder'])
+        # decoder_attention_mask = self.inputer.get_mask(batch['decoder'])
+        # decoder_input_embeddings = self.inputer.get_embeddings(batch['decoder'])
+        #
+        # if self.is_residual_vq:
+        #     seq_len = encoder_attention_mask.shape[1]
+        #     input_hidden_states = input_hidden_states.unsqueeze(dim=1).repeat(1, seq_len, 1)
+        #     encoder_attention_mask = torch.zeros_like(encoder_attention_mask)
+        #     encoder_attention_mask[:, 0] = 1
+        #
+        # output: BaseModelOutput = self.bart.decoder(
+        #     inputs_embeds=decoder_input_embeddings,
+        #     attention_mask=decoder_attention_mask,
+        #     encoder_hidden_states=input_hidden_states,
+        #     encoder_attention_mask=encoder_attention_mask,
+        #     return_dict=True,
+        # )
+        # decoder_hidden_states = output.last_hidden_state
+        # return decoder_hidden_states
 
     def forward(self, batch: dict, visualize=False) -> ITOutput:
         encoder_hidden_states: torch.Tensor = self._encode(batch)
-        hidden_vector = self.attention(encoder_hidden_states)
 
         # noinspection PyArgumentList
-        input_hidden_states, quantized, kl_divergence = self.handler(hidden_vector)
+        input_hidden_states, quantized, kl_divergence = self.handler(encoder_hidden_states)
 
         # reconstruction loss for encoder_hidden_states and input_hidden_states
         # reconstruction_loss = torch.mean(torch.sum((encoder_hidden_states - input_hidden_states) ** 2, dim=-1))
@@ -328,10 +361,13 @@ class IT(nn.Module):
                 output, mask.unsqueeze(dim=-1)).view(-1, voc_size).to(Setting.device)
             col_labels = torch.masked_select(labels_for_voc, mask).to(Setting.device)
 
-            loss = self.loss_fct(
-                distribution,
-                col_labels
-            )
+            if not torch.sum(col_labels):
+                loss = torch.tensor(0, dtype=torch.float).to(Setting.device)
+            else:
+                loss = self.loss_fct(
+                    distribution,
+                    col_labels
+                )
             generation_loss += loss
             voc_loss[voc_name] = loss
 

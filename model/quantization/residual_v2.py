@@ -1,4 +1,5 @@
 import torch
+from pigmento import pnt
 from torch import nn
 from vqtorch import ResidualVectorQuant
 
@@ -31,6 +32,7 @@ class ResidualQuantizationV2(nn.Module):
             share=False,
             **kwargs,
         )
+        # pnt(f'RQ: groups={depth}, num_codes={num_codes}')
 
     def initialize(
             self,
@@ -44,11 +46,16 @@ class ResidualQuantizationV2(nn.Module):
             embeds,  # [B, H, D]
     ) -> ResidualQuantizationOutput:
         quantized, output = self.quantizer(embeds)
+        # for k in output:
+        #     if output[k] is not None:
+        #         pnt('output[%s]: %s' % (k, output[k].shape))
+        #     else:
+        #         pnt('output[%s]: None' % k)
         return ResidualQuantizationOutput(
             embeds,
             quantized,
             output['q'],
-            output['loss'],
+            output['loss'].mean(),
         )
 
     def get_codebooks(self):

@@ -1,9 +1,8 @@
-from typing import Dict, Union
+from typing import Dict, Union, Optional
 
 import torch
 from UniTok import Vocab
 from pigmento import pnt
-from tensorboard.plugins.projector import EmbeddingInfo
 from torch import nn
 
 from loader.embedding.embedding_loader import EmbeddingLoader
@@ -53,16 +52,27 @@ class EmbeddingManager:
 
         self.hidden_size = hidden_size
         self.same_dim_transform = same_dim_transform
-        self._pretrained = dict()  # type: Dict[str, EmbeddingInfo]
+        self._pretrained = dict()  # type: Dict[str, EmbeddingLoader]
 
         self._universal_vocab = Vocab(name='__universal__')
         self._reverse_universal_vocab_index = dict()
+        self._universal_classifier: Optional[BaseClassifier] = None
 
     def get_table(self):
         return self._table
 
     def get_classifier(self):
         return self._classifier
+
+    def get_universal_classifier(self):
+        if not self._universal_classifier:
+            self._universal_classifier = BaseClassifier(
+                vocab_size=len(self._universal_vocab),
+                hidden_size=self.hidden_size,
+                activation_function='gelu',
+                layer_norm_eps=1e-5,
+            )
+        return self._universal_classifier
 
     def get_vocab_map(self):
         return self._voc_map

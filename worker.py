@@ -128,6 +128,7 @@ class Worker:
         pnt(f'[test] {line}')
 
     def init(self):
+        return
         loader = self.config_manager.get_loader(Status.TRAIN)
         with torch.no_grad():
             embeds = []
@@ -165,6 +166,7 @@ class Worker:
                         res.quantization_loss * self.exp.policy.quant_weight +
                         res.reconstruction_loss * self.exp.policy.recon_weight +
                         res.kl_divergence * self.exp.policy.kl_weight)
+                # pnt(res.generation_loss, res.quantization_loss, res.reconstruction_loss, res.kl_divergence)
                 loss.backward()
 
                 accumulate_step += 1
@@ -291,10 +293,10 @@ class Worker:
 
         for name, p in self.it.named_parameters():  # type: str, torch.Tensor
             if p.requires_grad:
-                param_key = '.'.join(name.split('.')[:2])
-                if param_key not in param_set:
-                    param_set.add(param_key)
-                    pnt(param_key)
+                # param_key = '.'.join(name.split('.')[:2])
+                # if param_key not in param_set:
+                #     param_set.add(param_key)
+                pnt(f'param {name} with shape {p.shape}')
 
         if self.load_path:
             self.load(self.load_path[0])
@@ -319,7 +321,10 @@ class Worker:
         np.save(os.path.join(store_dir, 'codebooks.npy'), codebooks)
 
         num_items = len(self.config_manager.item_depot.depot)
-        num_heads = self.it.config.num_heads
+        if self.it.is_residual_vq:
+            num_heads = self.it.config.residual_depth
+        else:
+            num_heads = self.it.config.num_heads
         code_matrix = np.zeros((num_items, num_heads), dtype=np.int32) - 1
 
         with torch.no_grad():
