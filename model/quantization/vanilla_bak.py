@@ -1,10 +1,10 @@
 import numpy as np
 import torch
-from pigmento import pnt
 from sklearn.cluster import KMeans
 from torch import nn
 from torch.nn import functional as F
 
+from loader.global_setting import Setting
 from model.quantization.base import BaseQuantization, BaseQuantizationOutput
 
 
@@ -26,19 +26,13 @@ class VanillaQuantization(BaseQuantization):
         self.threshold_disappearance = threshold_disappearance
         self.num_quantized = 0
 
-        self.total_change = 0
-
     def initialize(self, embeds: torch.Tensor):
         """
         use k-means to initialize the codebook based on the entire embedding space
         :param embeds: [N, D]
         """
-        kmeans = KMeans(n_clusters=self.num_codes, random_state=0, verbose=False, n_init=1).fit(embeds.cpu().numpy())
+        kmeans = KMeans(n_clusters=self.num_codes, random_state=0).fit(embeds.cpu().numpy())
         self.codebook.weight.data.copy_(torch.from_numpy(kmeans.cluster_centers_))
-
-    def epoch_initialize(self):
-        pnt('last epoch code change: ', self.total_change)
-        self.total_change = 0
 
     def update(
             self,
@@ -50,15 +44,12 @@ class VanillaQuantization(BaseQuantization):
 
         # if current code is not used by any entity, reinitialize it
         mask = self.num_quantized // self.num_codes < self.codecount * self.threshold_disappearance
-        mask_size = mask.sum().item()
         mask = torch.from_numpy(mask).to(embeds.device)
 
-        self.total_change += mask_size
-
-        if mask_size:
+        if torch.any(mask):
             # randomly sample embeds
             indices = np.arange(embeds.shape[0])
-            indices = np.random.choice(indices, size=mask_size, replace=False)
+            indices = np.random.choice(indices, size=mask.sum(), replace=False)
             embeds = embeds[indices]
 
             # replace masked codebook with random embeddings
@@ -83,7 +74,7 @@ class VanillaQuantization(BaseQuantization):
         ph.scatter_(1, indices, 1)
         codes = torch.matmul(ph, self.codebook.weight).view(embeds.shape)
 
-        output = VanillaQuantizationOutput(codes, indices=indices.squeeze(1))
+        output = VanillaQuantizationOutput(codes, indices=indices)
 
         if not with_loss:
             return output
@@ -91,6 +82,3 @@ class VanillaQuantization(BaseQuantization):
         loss = torch.tensor(0, dtype=torch.float, device=embeds.device)
         loss += F.mse_loss(codes.detach(), embeds) * self.commitment_cost + F.mse_loss(codes, embeds.detach())
         return output.set_loss(loss)
-
-    def get_codebooks(self):
-        return self.codebook.weight.data.cpu().numpy()

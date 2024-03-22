@@ -7,13 +7,11 @@ from vqtorch import ResidualVectorQuant
 class ResidualQuantizationOutput:
     def __init__(
             self,
-            embeds,
-            quantized,
-            indices,
-            loss,
+            embeds=None,
+            indices=None,
+            loss=None,
     ):
         self.embeds = embeds
-        self.quantized = quantized
         self.indices = indices
         self.loss = loss
 
@@ -38,12 +36,14 @@ class ResidualQuantizationV2(nn.Module):
             self,
             embeds: torch.Tensor
     ):
+        pnt('initialize RQ ...')
         with torch.no_grad():
             self.quantizer(embeds)
 
     def __call__(
             self,
             embeds,  # [B, H, D]
+            **kwargs,
     ) -> ResidualQuantizationOutput:
         quantized, output = self.quantizer(embeds)
         # for k in output:
@@ -52,7 +52,6 @@ class ResidualQuantizationV2(nn.Module):
         #     else:
         #         pnt('output[%s]: None' % k)
         return ResidualQuantizationOutput(
-            embeds,
             quantized,
             output['q'],
             output['loss'].mean(),

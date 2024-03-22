@@ -58,6 +58,8 @@ class EmbeddingManager:
         self._reverse_universal_vocab_index = dict()
         self._universal_classifier: Optional[BaseClassifier] = None
 
+        self._displayed_voc_map = False
+
     def get_table(self):
         return self._table
 
@@ -75,6 +77,9 @@ class EmbeddingManager:
         return self._universal_classifier
 
     def get_vocab_map(self):
+        if not self._displayed_voc_map:
+            pnt(f'vocab map: {self._voc_map}')
+            self._displayed_voc_map = True
         return self._voc_map
 
     def get(self, col, as_vocab=False):

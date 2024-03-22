@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+from typing import cast
 
 import numpy as np
 import pigmento
@@ -14,13 +15,18 @@ from transformers import get_linear_schedule_with_warmup
 
 from loader.config_manager import ConfigManager
 from loader.global_setting import Setting, Status
-from model.it import ITOutput, IT
+from model.it import ITOutput, IT, Handler
 from utils.config_init import ConfigInit
 from utils.gpu import GPU
 from utils.meaner import Meaner
 from utils.monitor import Monitor
 from utils.structure import Structure
 
+
+default_n_threads = 8
+os.environ['OPENBLAS_NUM_THREADS'] = f"1"
+os.environ['MKL_NUM_THREADS'] = f"{default_n_threads}"
+os.environ['OMP_NUM_THREADS'] = f"{default_n_threads}"
 
 torch.autograd.set_detect_anomaly(True)
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -106,6 +112,7 @@ class Worker:
             return
 
         save_dir = os.path.join(self.exp.dir, self.exp.load.save_dir)
+        save_dir = cast(str, save_dir)
         epochs = Obj.raw(self.exp.load.epochs)
         if not epochs:
             epochs = json.load(open(os.path.join(save_dir, 'candidates.json')))
@@ -129,15 +136,16 @@ class Worker:
 
     def init(self):
         return
+        if self.it.config.handler == Handler.BASELINE:
+            return
         loader = self.config_manager.get_loader(Status.TRAIN)
         with torch.no_grad():
             embeds = []
             for step, batch in enumerate(tqdm(loader, disable=self.disable_tqdm)):
-                embed = self.it.init(batch=batch).detach().cpu()
+                embed = self.it.init(batch=batch).detach()
                 embeds.append(embed)
             embeds = torch.cat(embeds, dim=0)
 
-            self.it.cpu()
             self.it.quantizer.initialize(embeds=embeds)
             self.it.to(Setting.device)
 
@@ -159,10 +167,11 @@ class Worker:
         self.m_optimizer.zero_grad()
         for epoch in range(self.exp.policy.epoch_start, self.exp.policy.epoch + self.exp.policy.epoch_start):
             # loader.start_epoch(epoch - self.exp.policy.epoch_start, self.exp.policy.epoch)
+            self.it.quantizer.epoch_initialize()
             self.it.train()
             for step, batch in enumerate(tqdm(loader, disable=self.disable_tqdm)):
                 res = self.it(batch=batch)  # type: ITOutput
-                loss = (res.generation_loss +
+                loss = (res.generation_loss * self.exp.policy.gen_weight +
                         res.quantization_loss * self.exp.policy.quant_weight +
                         res.reconstruction_loss * self.exp.policy.recon_weight +
                         res.kl_divergence * self.exp.policy.kl_weight)
@@ -270,10 +279,13 @@ class Worker:
             res: ITOutput = self.it(batch=batch, visualize=True)
             true_labels, pred_labels = res.true_labels, res.pred_labels
             batch_size = true_labels.shape[0]
-
+            # states = res.states
+            # indices = res.indices
             for i_batch in range(min(batch_size, 10)):
                 pnt(f'true: {universal_decode(true_labels[i_batch])}')
                 pnt(f'pred: {universal_decode(pred_labels[i_batch])}')
+                # pnt(f'indices: {indices[i_batch]}')
+                # pnt(f'states: {states[i_batch]}')
                 pnt('')
 
             break
@@ -312,6 +324,25 @@ class Worker:
 
     def display(self):
         pnt(self.config_manager.sets.a_set()[0])
+
+    def export_states(self):
+        store_dir = self.exp.store.export_dir
+
+        num_items = len(self.config_manager.item_depot.depot)
+        item_embeds = np.zeros((num_items, self.it.config.embed_dim), dtype=np.float32)
+
+        with torch.no_grad():
+            for status in [Status.TRAIN, Status.DEV, Status.TEST]:
+                loader = self.config_manager.get_loader(status)
+                for step, batch in enumerate(tqdm(loader, disable=self.disable_tqdm)):
+                    item_ids, embeds = self.it.get_embeds(batch=batch)
+                    item_ids = item_ids.detach().cpu().numpy()
+                    embeds = embeds.cpu().numpy()
+                    item_embeds[item_ids] = embeds
+
+        np.save(os.path.join(store_dir, 'item_embeds.npy'), item_embeds)
+
+        pnt(f'export to {store_dir}')
 
     def export(self):
         store_dir = self.exp.store.export_dir
@@ -355,6 +386,9 @@ class Worker:
         elif self.mode == 'export':
             self.load(self.load_path[0])
             self.export()
+        elif self.mode == 'export_states':
+            self.load(self.load_path[0])
+            self.export_states()
         elif self.mode == 'visualize':
             self.load(self.load_path[0])
             self.visualize()
@@ -368,16 +402,21 @@ if __name__ == '__main__':
             embed='config/embed/bart.yaml',
             warmup=0,
             batch_size=64,
-            lr=0.0001,
+            lr=0.001,
             patience=2,
             epoch_start=0,
             frozen=True,
             load_path=None,
             acc_batch=1,
+            dim=768,
+            pretrain=1,
+            attnlayers=6,
+            attnheads=12,
 
             quant=1.0,
             recon=1.0,
             kl=1.0,
+            gen=1.0,
         ),
         makedirs=[
             'exp.dir',

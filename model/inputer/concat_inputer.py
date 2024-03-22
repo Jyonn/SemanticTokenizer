@@ -102,6 +102,26 @@ class ConcatInputer(BaseInputer):
             label_types=label_types,
         )
 
+    def get_autoregressive_labels_universal(self, sample: OrderedDict):
+        pointer = Pointer()
+        labels = self.get_empty_input()
+        special_mapper = self.embedding_manager.universal_mapper(self.vocab.name)
+
+        for col in self.order:
+            value = sample[col]
+            if not isinstance(value, list):
+                value = [value]
+            mapper = self.embedding_manager.universal_mapper(self.depot.cols[col].voc.name)
+            value = torch.tensor([mapper(v) for v in value], dtype=torch.long)
+
+            pointer.update_input(labels, value)
+
+            if self.use_sep_token and col != self.order[-1]:
+                pointer.update_special_token(labels, special_mapper(self.SEP))
+
+        pointer.update_special_token(labels, special_mapper(self.EOS))
+        return labels
+
     def sample_rebuilder(self, sample: OrderedDict, target: Literal['encoder', 'decoder']):
         _pointer = TypePointer(
             vocab_map=self.vocab_map,

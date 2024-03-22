@@ -58,11 +58,12 @@ class BaseDataset(Dataset):
             append[col] = sample[col]
         encoder = self.inputer.sample_rebuilder(order, self.inputer.ENCODER)
         decoder = self.inputer.sample_rebuilder(order, self.inputer.DECODER)
-        labels = self.inputer.get_autoregressive_labels(order)
+        # labels = self.inputer.get_autoregressive_labels(order)
+        # labels = self.inputer.get_autoregressive_labels_universal(order)
         return dict(
             encoder=encoder,
             decoder=decoder,
-            labels=labels,
+            # labels=labels,
             append=append,
         )
 

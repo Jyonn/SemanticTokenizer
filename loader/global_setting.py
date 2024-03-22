@@ -11,6 +11,8 @@ class Setting:
     simple_dev = False
     fast_eval = False
 
+    it = None
+
     # pad
     UNSET = -1
 

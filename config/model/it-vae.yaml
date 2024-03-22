@@ -1,7 +1,7 @@
-name: VAE-H${model.config.num_heads}
+name: VAE-H${model.config.residual_depth}
 config:
   embed_dim: 768
-  num_heads: ${heads}$
-  num_codes: 512
+  residual_depth: ${depth}$
+  num_codes: ${codes}$
   use_sep_token: true
   vae: true

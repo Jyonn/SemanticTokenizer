@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from UniTok import UniDep, Fut, Vocab
 
-depth = 6
+depth = 3
 code_size = 192
 path = f'saving/MIND-small/Depth{depth}-C{code_size}/export/'
 

@@ -1,0 +1,7 @@
+name: user
+embeddings:
+  -
+    vocab_name: nid
+    vocab_type: numpy
+    path: saving/MIND-small/Bart/export_states/item_embeds.npy
+    frozen: ${frozen}$

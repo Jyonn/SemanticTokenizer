@@ -1,16 +1,19 @@
 import os
 
 import torch
-from pigmento import pnt
 from torch import nn
-from transformers import BartModel
+from transformers import BartModel, BartConfig
 from transformers.modeling_outputs import BaseModelOutput
 
 from loader.embedding.embedding_manager import EmbeddingManager
 from loader.global_setting import Setting
+from model.handlers.base_handler import BaseHandler, HandlerOutput
+from model.handlers.quant_handler import QuantHandler
+from model.handlers.vae_handler import VAEHandler
+from model.handlers.vae_quant_handler import VAEQuantHandler
 from model.inputer.concat_inputer import ConcatInputer
-from model.quantization.multihead_v2 import MultiHeadQuantizationV2, MultiHeadQuantizationOutput
-from model.quantization.residual_v2 import ResidualQuantizationV2
+from model.quantization.residual import ResidualQuantization
+# from model.quantization.residual_v2 import ResidualQuantizationV2
 from model.utils.attention import AdditiveAttention
 from model.utils.base_classifier import BaseClassifier
 
@@ -26,6 +29,7 @@ class ITOutput:
             voc_loss: dict,
             pred_labels: torch.Tensor = None,
             true_labels: torch.Tensor = None,
+            **kwargs,
     ):
         self.last_hidden_states = last_hidden_states
         self.pred_labels = pred_labels
@@ -37,6 +41,17 @@ class ITOutput:
         self.kl_divergence = kl_divergence
         self.voc_loss = voc_loss
 
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+class Handler:
+    BASELINE = 'baseline'
+    LOW_RANK = 'low_rank'
+    VAE = 'vae'
+    VAE_QUANT = 'vae_quant'
+    QUANT = 'quant'
+
 
 class ITConfig:
     def __init__(
@@ -47,11 +62,15 @@ class ITConfig:
             num_codes: int = 512,
             residual_depth: int = 4,
             commitment_cost: float = 0.0,
-            skip_quant: bool = False,
-            low_rank: bool = False,
-            vae: bool = False,
-            vae_quant: bool = False,
-            kd: bool = False,
+            handler: str = Handler.BASELINE,
+            use_pretrained_model: bool = True,
+            num_layers: int = 6,
+            num_attention_heads: int = 12,
+            # baseline: bool = False,
+            # low_rank: bool = False,
+            # vae: bool = False,
+            # vae_quant: bool = False,
+            # kd: bool = False,
             **kwargs,
     ):
         if isinstance(num_codes, str):
@@ -63,45 +82,18 @@ class ITConfig:
         self.residual_depth = residual_depth
         self.num_codes = num_codes
         self.commitment_cost = commitment_cost
-        self.skip_quant = skip_quant
-        self.low_rank = low_rank
-        self.vae = vae
-        self.vae_quant = vae_quant
-        self.kd = kd
+        self.handler = handler
+        self.use_pretrained_model = use_pretrained_model
+        self.num_layers = num_layers
+        self.num_attention_heads = num_attention_heads
+        # self.baseline = baseline
+        # self.low_rank = low_rank
+        # self.vae = vae
+        # self.vae_quant = vae_quant
+        # self.kd = kd
 
 
-class VAEEncoder(nn.Module):
-    def __init__(self, embed_dim):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.fc1 = nn.Linear(self.embed_dim, self.embed_dim)
-        self.fc_mu = nn.Linear(self.embed_dim, self.embed_dim)
-        self.fc_var = nn.Linear(self.embed_dim, self.embed_dim)
 
-    @staticmethod
-    def reparameterize(mu, log_var):
-        std = torch.exp(0.5 * log_var)
-        eps = torch.randn_like(std)
-        return eps * std + mu
-
-    def forward(self, x):
-        h1 = torch.relu(self.fc1(x))
-        mu = self.fc_mu(h1)
-        log_var = self.fc_var(h1)
-        z = self.reparameterize(mu, log_var)
-        return mu, log_var, z
-
-
-class VAEDecoder(nn.Module):
-    def __init__(self, embed_dim):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.fc1 = nn.Linear(self.embed_dim, self.embed_dim)
-        self.fc2 = nn.Linear(self.embed_dim, self.embed_dim)
-
-    def forward(self, x):
-        h1 = torch.relu(self.fc1(x))
-        return self.fc2(h1)
 
 
 class IT(nn.Module):
@@ -121,72 +113,108 @@ class IT(nn.Module):
         self.embedding_manager = embedding_manager
         self.embedding_table = embedding_manager.get_table()
 
-        bart_path = '/data1/qijiong/Code/bart-base'
-        if not os.path.exists(bart_path):
-            bart_path = 'facebook/bart-base'
-        self.bart = BartModel.from_pretrained(bart_path)  # type: BartModel
+        if self.config.use_pretrained_model:
+            bart_path = '/data1/qijiong/Code/bart-base'
+            if not os.path.exists(bart_path):
+                bart_path = 'facebook/bart-base'
+            self.bart = BartModel.from_pretrained(bart_path)  # type: BartModel
+        else:
+            self.bart = BartModel(
+                config=BartConfig(
+                    vocab_size=5,
+                    d_model=self.config.embed_dim,
+                    encoder_layers=self.config.num_layers,
+                    decoder_layers=self.config.num_layers,
+                    encoder_attention_heads=self.config.num_attention_heads,
+                    decoder_attention_heads=self.config.num_attention_heads,
+                    encoder_ffn_dim=self.config.embed_dim * 4,
+                    decoder_ffn_dim=self.config.embed_dim * 4,
+                )
+            )
 
-        self.back_outer_proj = nn.Linear(self.max_sequence_len, self.config.num_heads)
+        # self.back_outer_proj = nn.Linear(self.max_sequence_len, self.config.num_heads)
         # self.back_inner_proj = nn.Linear(self.config.embed_dim, self.config.hidden_size)
-        self.back_inner_proj = lambda x: x
-        self.vae_encoder = VAEEncoder(self.config.embed_dim)
+        # self.back_inner_proj = lambda x: x
+        # self.vae_encoder = VAEEncoder(self.config.embed_dim)
 
         # self.forth_inner_proj = nn.Linear(self.config.hidden_size, self.config.embed_dim)
-        self.forth_inner_proj = lambda x: x
-        self.forth_outer_proj = nn.Linear(self.config.num_heads, self.max_sequence_len)
-        self.vae_decoder = VAEDecoder(self.config.embed_dim)
+        # self.forth_inner_proj = lambda x: x
+        # self.forth_outer_proj = nn.Linear(self.config.num_heads, self.max_sequence_len)
+        # self.vae_decoder = VAEDecoder(self.config.embed_dim)
 
         self.attention = AdditiveAttention(self.config.embed_dim, self.config.hidden_size)
 
-        if not self.config.skip_quant:
-            # self.quantizer = MultiHeadQuantizationV2(
-            #     feature_size=self.config.embed_dim,
-            #     num_heads=self.config.num_heads,
-            #     num_codes=self.config.num_codes,
-            #     beta=self.config.commitment_cost,
-            #     kmeans_init=True,
-            #     affine_lr=10.0,
-            #     replace_freq=10,
-            #     sync_nu=0.2,
-            #     dim=-1,
+        # self.use_dnn = self.config.dnn_dim is not None
+        # self.quant_dim = self.config.dnn_dim or self.config.embed_dim
+        # if self.use_dnn:
+        #     self.dnn_1 = nn.Linear(self.config.embed_dim, self.config.dnn_dim)
+        #     self.dnn_2 = nn.Linear(self.config.dnn_dim, self.config.embed_dim)
+            # self.full_codes = nn.Embedding(
+            #     self.config.num_codes,
+            #     self.config.embed_dim,
             # )
 
-            self.quantizer = ResidualQuantizationV2(
-                feature_size=self.config.embed_dim,
-                num_codes=self.config.num_codes,
-                depth=self.config.residual_depth,
-                beta=self.config.commitment_cost,
-                kmeans_init=True,
-                affine_lr=10.0,
-                replace_freq=10,
-                sync_nu=0.2,
-                dim=-1,
-            )
+        # if not self.config.baseline:
+        #     self.quantizer = MultiHeadQuantizationV2(
+        #         feature_size=self.config.embed_dim,
+        #         num_heads=self.config.num_heads,
+        #         num_codes=self.config.num_codes,
+        #         beta=self.config.commitment_cost,
+        #         kmeans_init=True,
+        #         affine_lr=10.0,
+        #         replace_freq=10,
+        #         sync_nu=0.2,
+        #         dim=-1,
+        #     )
 
-        self.is_residual_vq = isinstance(self.quantizer, ResidualQuantizationV2)
-        # self.classifier = self.embedding_manager.get_classifier()
-        self.classifier = self.embedding_manager.get_universal_classifier()
+        # self.quantizer = ResidualQuantizationV2(
+        #     feature_size=self.config.embed_dim,
+        #     num_codes=self.config.num_codes,
+        #     depth=self.config.residual_depth,
+        #     beta=self.config.commitment_cost,
+        #     kmeans_init=True,
+        #     affine_lr=10.0,
+        #     replace_freq=10,
+        #     sync_nu=0.2,
+        #     dim=-1,
+        # )
+        self.quantizer = ResidualQuantization(
+            num_layers=self.config.residual_depth,
+            num_codes=self.config.num_codes // self.config.residual_depth,
+            commitment_cost=self.config.commitment_cost,
+            threshold_disappearance=256,
+            dim=self.config.embed_dim,
+        )
+
+        self.is_residual_vq = not self.config.handler == Handler.BASELINE and isinstance(self.quantizer, ResidualQuantization)
+        self.classifier = self.embedding_manager.get_classifier()
+        # self.classifier = self.embedding_manager.get_universal_classifier()
         self.loss_fct = nn.CrossEntropyLoss()
 
-        if self.config.kd:
-            # frozen bart and classifier
-            for param in self.bart.parameters():
-                param.requires_grad = False
-            for param in self.classifier.parameters():
-                param.requires_grad = False
+        # if self.config.kd:
+        #     # frozen bart and classifier
+        #     for param in self.bart.parameters():
+        #         param.requires_grad = False
+        #     for param in self.classifier.parameters():
+        #         param.requires_grad = False
+        #     for param in self.attention.parameters():
+        #         param.requires_grad = False
 
         self.handler = self.get_handler()
 
+        Setting.it = self
+
     def get_handler(self):
-        if self.config.skip_quant:
-            return self.skip_quant
-        if self.config.low_rank:
-            return self.low_rank
-        if self.config.vae:
-            return self.vae
-        if self.config.vae_quant:
-            return self.vae_quant
-        return self.quant
+        if self.config.handler == Handler.BASELINE:
+            return BaseHandler()
+        if self.config.handler == Handler.QUANT:
+            return QuantHandler()
+        if self.config.handler == Handler.VAE:
+            return VAEHandler()
+        if self.config.handler == Handler.VAE_QUANT:
+            return VAEQuantHandler()
+
+        raise ValueError(f'handler {self.config.handler} not supported')
 
     def _encode(self, batch: dict):
         encoder_attention_mask = self.inputer.get_mask(batch['encoder'])
@@ -200,88 +228,45 @@ class IT(nn.Module):
         encoder_hidden_states = output.last_hidden_state  # [B, L, D]
         return encoder_hidden_states
 
-    def _decode(self, batch, input_hidden_states):
+    def _decode(self, batch, states):
         encoder_attention_mask = self.inputer.get_mask(batch['encoder'])
         decoder_attention_mask = self.inputer.get_mask(batch['decoder'])
         decoder_input_embeddings = self.inputer.get_embeddings(batch['decoder'])
 
-        if self.is_residual_vq:
+        # if self.is_residual_vq:
+        if states.dim() == 2:
             seq_len = encoder_attention_mask.shape[1]
-            input_hidden_states = input_hidden_states.unsqueeze(dim=1).repeat(1, seq_len, 1)
-            encoder_attention_mask = torch.zeros_like(encoder_attention_mask)
-            encoder_attention_mask[:, 0] = 1
+            states = states.unsqueeze(dim=1).repeat(1, seq_len, 1)
+        encoder_attention_mask = torch.zeros_like(encoder_attention_mask)
+        encoder_attention_mask[:, 0] = 1
 
         output: BaseModelOutput = self.bart.decoder(
             inputs_embeds=decoder_input_embeddings,
             attention_mask=decoder_attention_mask,
-            encoder_hidden_states=input_hidden_states,
+            encoder_hidden_states=states,
             encoder_attention_mask=encoder_attention_mask,
             return_dict=True,
         )
         decoder_hidden_states = output.last_hidden_state
         return decoder_hidden_states
 
-    def get_zero_loss(self):
-        output = MultiHeadQuantizationOutput()
-        output.loss = torch.tensor(0, dtype=torch.float).to(Setting.device)
-        return output
-
-    def skip_quant(self, encoder_hidden_states: torch.Tensor):
-        input_hidden_states = encoder_hidden_states
-        quantized = self.get_zero_loss()
-        kl_divergence = torch.tensor(0, dtype=torch.float).to(Setting.device)
-        return input_hidden_states, quantized, kl_divergence
-
-    def low_rank(self, encoder_hidden_states: torch.Tensor):
-        embeds = self.back_outer_proj(encoder_hidden_states.transpose(1, 2)).transpose(1, 2)
-        embeds = self.back_inner_proj(embeds)
-        embeds = self.forth_inner_proj(embeds)
-        input_hidden_states = self.forth_outer_proj(embeds.transpose(1, 2)).transpose(1, 2)
-        quantized = self.get_zero_loss()
-        kl_divergence = torch.tensor(0, dtype=torch.float).to(Setting.device)
-        return input_hidden_states, quantized, kl_divergence
-
-    def vae(self, encoder_hidden_states: torch.Tensor):
-        embeds = self.back_outer_proj(encoder_hidden_states.transpose(1, 2)).transpose(1, 2)
-        embeds = self.back_inner_proj(embeds)
-        mu, log_var, z = self.vae_encoder(embeds)
-        embeds_hat = self.vae_decoder(z)
-        embeds_hat = self.forth_inner_proj(embeds_hat)
-        input_hidden_states = self.forth_outer_proj(embeds_hat.transpose(1, 2)).transpose(1, 2)
-        quantized = self.get_zero_loss()
-        kl_divergence = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
-        return input_hidden_states, quantized, kl_divergence
-
-    def vae_quant(self, encoder_hidden_states: torch.Tensor):
-        embeds = self.back_outer_proj(encoder_hidden_states.transpose(1, 2)).transpose(1, 2)
-        embeds = self.back_inner_proj(embeds)
-        mu, log_var, z = self.vae_encoder(embeds)
-        quantized = self.quantizer(z)
-        quantized_embeds = torch.stack(quantized.embeds, dim=1)  # [B, H, D]
-        embeds_hat = self.vae_decoder(quantized_embeds)
-        embeds_hat = self.forth_inner_proj(embeds_hat)
-        input_hidden_states = self.forth_outer_proj(embeds_hat.transpose(1, 2)).transpose(1, 2)
-        kl_divergence = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
-        return input_hidden_states, quantized, kl_divergence
-
-    def quant(self, encoder_hidden_states: torch.Tensor):
-        embeds = self.attention(encoder_hidden_states)
-        quantized = self.quantizer(embeds)
-        input_hidden_states = quantized.embeds  #
-        kl_divergence = torch.tensor(0, dtype=torch.float).to(Setting.device)
-        return input_hidden_states, quantized, kl_divergence
-
     def get_codebooks(self):
         return self.quantizer.get_codebooks()
+
+    def get_embeds(self, batch: dict):
+        encoder_hidden_states: torch.Tensor = self._encode(batch)
+        item_ids = batch['append'][self.depot.id_col]  # [B]
+        embeds = self.attention(encoder_hidden_states)
+        return item_ids, embeds
 
     def get_codes(self, batch: dict):
         encoder_hidden_states: torch.Tensor = self._encode(batch)
 
         # noinspection PyArgumentList
-        _, quantized, _ = self.handler(encoder_hidden_states)
+        _, quantized, _, _ = self.handler(encoder_hidden_states)
         # pnt(quantized.indices.shape)
         indices = quantized.indices
-        if isinstance(indices, list):  # for multihead quantization
+        if isinstance(indices, list):
             indices = torch.stack(quantized.indices, dim=1)  # [B, H]
         item_ids = batch['append'][self.depot.id_col]  # [B]
 
@@ -290,6 +275,8 @@ class IT(nn.Module):
     def init(self, batch: dict):
         encoder_hidden_states: torch.Tensor = self._encode(batch)
         embeds = self.attention(encoder_hidden_states)
+        # if self.use_dnn:
+        #     embeds = self.dnn_1(embeds)
         return embeds
 
     def generate(self, codes):
@@ -324,31 +311,45 @@ class IT(nn.Module):
         encoder_hidden_states: torch.Tensor = self._encode(batch)
 
         # noinspection PyArgumentList
-        input_hidden_states, quantized, kl_divergence = self.handler(encoder_hidden_states)
+        handler_output: HandlerOutput = self.handler(encoder_hidden_states)
 
-        # reconstruction loss for encoder_hidden_states and input_hidden_states
-        # reconstruction_loss = torch.mean(torch.sum((encoder_hidden_states - input_hidden_states) ** 2, dim=-1))
-        reconstruction_loss = torch.tensor(0, dtype=torch.float).to(Setting.device)
+        decoder_hidden_states = self._decode(batch, handler_output.states)
 
-        if self.config.kd:
-            return ITOutput(
-                last_hidden_states=input_hidden_states,
-                quantization_loss=quantized.loss,
-                generation_loss=torch.tensor(0, dtype=torch.float).to(Setting.device),
-                reconstruction_loss=reconstruction_loss,
-                kl_divergence=kl_divergence,
-                voc_loss=dict(),
-            )
-
-        decoder_hidden_states = self._decode(batch, input_hidden_states)
-
-        labels = batch['labels']['labels'].to(Setting.device)  # type: torch.Tensor
-        labels_types = batch['labels']['label_types'].to(Setting.device)  # type: torch.Tensor
+        labels = batch['encoder']['input_ids'].to(Setting.device)  # type: torch.Tensor
+        labels_types = batch['encoder']['input_types'].to(Setting.device)  # type: torch.Tensor
 
         generation_loss = torch.tensor(0, dtype=torch.float).to(Setting.device)
 
         pred_labels = torch.zeros(labels.shape, dtype=torch.long)
         true_labels = torch.zeros(labels.shape, dtype=torch.long)
+
+        # mask = torch.not_equal(labels, Setting.UNSET)
+        # labels = labels * mask
+        # output = self.classifier(decoder_hidden_states)
+        # voc_size = self.classifier.vocab_size
+        #
+        # distribution = torch.masked_select(
+        #     output, mask.unsqueeze(dim=-1)).view(-1, voc_size).to(Setting.device)
+        # col_labels = torch.masked_select(labels, mask).to(Setting.device)
+        #
+        # if not torch.sum(col_labels):
+        #     loss = torch.tensor(0, dtype=torch.float).to(Setting.device)
+        # else:
+        #     loss = self.loss_fct(
+        #         distribution,
+        #         col_labels
+        #     )
+        #
+        # generation_loss += loss
+        # voc_loss = dict(universal=loss)
+        #
+        # if visualize:
+        #     mask = mask.cpu()
+        #     pred_label = torch.argmax(output, dim=-1).cpu()
+        #     pred_labels[mask] = pred_label[mask]
+        #     true_label = labels.cpu()
+        #     true_labels[mask] = true_label[mask]
+
         voc_loss = dict()
         for voc_name, voc_id in self.inputer.vocab_map.items():
             mask = torch.eq(labels_types, voc_id)
@@ -374,9 +375,6 @@ class IT(nn.Module):
             if visualize:
                 mask = mask.cpu()
                 pred_label = torch.argmax(output, dim=-1).cpu()
-                # pnt(pred_label[0].tolist())
-                # pnt(mask[0].tolist())
-                # exit(0)
                 pred_label = pred_label.apply_(self.embedding_manager.universal_mapper(voc_name))
                 pred_labels[mask] = pred_label[mask]
                 true_label = labels_for_voc.cpu().apply_(self.embedding_manager.universal_mapper(voc_name))
@@ -386,9 +384,11 @@ class IT(nn.Module):
             last_hidden_states=decoder_hidden_states,
             pred_labels=pred_labels,
             true_labels=true_labels,
-            quantization_loss=quantized.loss,
+            quantization_loss=handler_output.quantized.loss,
             generation_loss=generation_loss,
-            reconstruction_loss=reconstruction_loss,
-            kl_divergence=kl_divergence,
+            reconstruction_loss=handler_output.recon,
+            kl_divergence=handler_output.kl,
             voc_loss=voc_loss,
+            # states=handler_output.states.sum(dim=-1),
+            # indices=handler_output.quantized.indices,
         )

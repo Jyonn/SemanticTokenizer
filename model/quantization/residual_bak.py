@@ -13,7 +13,7 @@ class ResidualQuantization(HierarchicalQuantization):
             self,
             embeds: torch.Tensor
     ):
-        for i in range(self.num_layers):
+        for i in range(self.num_heads):
             self.quantizers[i].initialize(embeds)
             centers = self.quantizers[i].codebook.weight.data
             dist = torch.cdist(embeds, centers, p=2)

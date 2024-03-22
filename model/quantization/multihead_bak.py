@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 from torch import nn
 
@@ -61,7 +60,3 @@ class MultiHeadQuantization(BaseQuantization):
                 mh_output.loss += output.loss
 
         return mh_output
-
-    def get_codebooks(self):
-        codebooks = [q.get_codebooks() for q in self.quantizers]  # list[np.ndarray]
-        return np.concatenate(codebooks, axis=0)

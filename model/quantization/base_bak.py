@@ -49,6 +49,3 @@ class BaseQuantization(nn.Module):
 
     def __call__(self, *args, **kwargs):
         return self.quantize(*args, **kwargs)
-
-    def get_codebooks(self):
-        raise NotImplementedError

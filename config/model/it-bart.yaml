@@ -1,7 +1,10 @@
 name: Bart
 config:
-  embed_dim: 768
-  num_heads: 3
-  num_codes: 512
+  embed_dim: ${dim}$
+  residual_depth: ${depth}$
+  num_codes: ${codes}$
   use_sep_token: true
-  skip_quant: true
+  handler: baseline
+  use_pretrained_model: ${pretrain}$
+  num_layers: ${attnlayers}$
+  num_attention_heads: ${attnheads}$

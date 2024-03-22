@@ -1,0 +1,8 @@
+name: MIND-${version}-user
+base_dir: data/MIND-${version}
+items:
+  depot: ${data.base_dir}/user-grp
+  order:
+    - history
+  append:
+    - uid

@@ -5,3 +5,4 @@ config:
   num_codes: ${codes}$
   use_sep_token: true
   commitment_cost: ${cost}$
+  handler: quant

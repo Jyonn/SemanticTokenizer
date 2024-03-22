@@ -1,8 +1,6 @@
-from typing import List, Union, cast
+from typing import List, Union
 
-import numpy as np
 import torch
-from pigmento import pnt
 from torch import nn
 
 from model.quantization.base import BaseQuantization
@@ -17,47 +15,31 @@ class HierarchicalQuantizationOutput(MultiHeadQuantizationOutput):
 class HierarchicalQuantization(BaseQuantization):
     def __init__(
             self,
+            num_layers: int,
             num_codes: Union[int, List[int]],
-            num_layers: int = None,
-            threshold_disappearance=-1,
             **kwargs,
     ):
         super().__init__(**kwargs, num_codes=num_codes)
 
-        if num_layers is None:
-            assert isinstance(self.num_codes, list), "num_codes must be a list if num_layers is not specified"
-            num_layers = len(self.num_codes)
-        self.num_layers = num_layers
-
         if isinstance(self.num_codes, int):
             self.num_codes = [self.num_codes] * num_layers  # type: List[int]
-
-        self.threshold_disappearance = threshold_disappearance
 
         self.quantizers = nn.ModuleList([
             VanillaQuantization(
                 dim=self.embed_dim,
                 num_codes=self.num_codes[i],
                 commitment_cost=self.commitment_cost,
-                threshold_disappearance=self.threshold_disappearance,
             )
-            for i in range(self.num_layers)
-        ])
+            for i in range(self.num_heads)
+        ])  # type: nn.ModuleList[VanillaQuantization]
 
     def initialize(
             self,
             embeds: torch.Tensor
     ):
-        for i in range(self.num_layers):
-            pnt(f'initialize quantizer {i} ...')
-            quantizer = cast(VanillaQuantization, self.quantizers[i])
-            quantizer.initialize(embeds)
+        for i in range(self.num_heads):
+            self.quantizers[i].initialize(embeds)
             embeds = self.quantizers[i].codebook.weight.data
-
-    def epoch_initialize(self):
-        for i in range(self.num_layers):
-            quantizer = cast(VanillaQuantization, self.quantizers[i])
-            quantizer.epoch_initialize()
 
     # noinspection PyMethodMayBeStatic
     def get_next_layer_embeds(
@@ -76,7 +58,7 @@ class HierarchicalQuantization(BaseQuantization):
         if with_loss:
             h_output.loss = torch.tensor(0, dtype=torch.float, device=embeds.device)
 
-        for i in range(self.num_layers):
+        for i in range(self.num_heads):
             output = self.quantizers[i](embeds, with_loss=with_loss)
             embeds = self.get_next_layer_embeds(embeds, output)
 
@@ -87,7 +69,3 @@ class HierarchicalQuantization(BaseQuantization):
                 h_output.loss += output.loss
 
         return h_output
-
-    def get_codebooks(self):
-        codebooks = [q.get_codebooks() for q in self.quantizers]  # list[np.ndarray]
-        return np.concatenate(codebooks, axis=0)
